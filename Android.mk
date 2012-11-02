@@ -22,7 +22,9 @@ include $(CLEAR_VARS)
 LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw
 LOCAL_SHARED_LIBRARIES := liblog libEGL
 LOCAL_SRC_FILES := hwcomposer.cpp
-LOCAL_MODULE := hwcomposer.zedboard
-LOCAL_CFLAGS:= -DLOG_TAG=\"hwcomposer\"
+
+LOCAL_MODULE := hwcomposer.zynq
+LOCAL_CFLAGS:= -DLOG_TAG=\"hwcomposer\" -DOSLIB_ADD_CPU_SUPPORT=1
 LOCAL_MODULE_TAGS := optional
+
 include $(BUILD_SHARED_LIBRARY)
