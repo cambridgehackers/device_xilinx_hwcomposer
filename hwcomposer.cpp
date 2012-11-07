@@ -72,7 +72,6 @@ static void dump_layer(hwc_layer_t const* l) {
 }
 
 static int hwc_prepare(hwc_composer_device_t *dev, hwc_layer_list_t* list) {
-  ALOGD("hwc_prepare");
     if (list && (list->flags & HWC_GEOMETRY_CHANGED)) {
         for (size_t i=0 ; i<list->numHwLayers ; i++) {
             dump_layer(&list->hwLayers[i]);
@@ -88,16 +87,16 @@ static int hwc_set(hwc_composer_device_t *dev,
         hwc_surface_t sur,
         hwc_layer_list_t* list)
 {
-    ALOGD("hwc_set dpy=%p surface=%p\n", dpy, sur);
-    for (size_t i=0 ; i<list->numHwLayers ; i++) {
-        dump_layer(&list->hwLayers[i]);
+    if (0) {
+        ALOGD("hwc_set dpy=%p surface=%p\n", dpy, sur);
+        for (size_t i=0 ; i<list->numHwLayers ; i++) {
+            dump_layer(&list->hwLayers[i]);
+        }
     }
 
-    if (1) {
-        EGLBoolean success = eglSwapBuffers((EGLDisplay)dpy, (EGLSurface)sur);
-        if (!success) {
-            return HWC_EGL_ERROR;
-        }
+    EGLBoolean success = eglSwapBuffers((EGLDisplay)dpy, (EGLSurface)sur);
+    if (!success) {
+        return HWC_EGL_ERROR;
     }
     return 0;
 }
