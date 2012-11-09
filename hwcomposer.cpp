@@ -26,6 +26,8 @@
 #include <cutils/atomic.h>
 
 #include <hardware/hwcomposer.h>
+#include "../gralloc/gralloc_priv.h"
+#include <linux/xylonbb.h>
 
 #include <EGL/egl.h>
 
@@ -35,6 +37,7 @@ struct hwc_context_t {
     hwc_composer_device_t device;
     /* our private state goes below here */
     int fd;
+    int bb_fd;
 };
 
 static int hwc_device_open(const struct hw_module_t* module, const char* name,
@@ -58,8 +61,10 @@ hwc_module_t HAL_MODULE_INFO_SYM = {
 
 /*****************************************************************************/
 
-static void dump_layer(hwc_layer_t const* l) {
-    ALOGD("\ttype=%d, flags=%08x, handle=%p, tr=%02x, blend=%04x, {%d,%d,%d,%d}, {%d,%d,%d,%d}",
+static void dump_layer(int layer_number, hwc_layer_t const* l) {
+    const private_handle_t *phnd = static_cast<const private_handle_t *>(l->handle);
+    ALOGD("%d \ttype=%d, flags=%08x, handle=%p, tr=%02x, blend=%04x, {%d,%d,%d,%d}, {%d,%d,%d,%d} stride=%d",
+            layer_number,
             l->compositionType, l->flags, l->handle, l->transform, l->blending,
             l->sourceCrop.left,
             l->sourceCrop.top,
@@ -68,18 +73,97 @@ static void dump_layer(hwc_layer_t const* l) {
             l->displayFrame.left,
             l->displayFrame.top,
             l->displayFrame.right,
-            l->displayFrame.bottom);
+            l->displayFrame.bottom,
+          phnd ? phnd->stride : -1);
 }
 
 static int hwc_prepare(hwc_composer_device_t *dev, hwc_layer_list_t* list) {
-    if (list && (list->flags & HWC_GEOMETRY_CHANGED)) {
-        for (size_t i=0 ; i<list->numHwLayers ; i++) {
-            dump_layer(&list->hwLayers[i]);
-            if (i > 0)
-                list->hwLayers[i].compositionType = HWC_OVERLAY;
+    if (list->numHwLayers > 1) {
+        ALOGD("hwc_prepare");
+        if (list && (list->flags & HWC_GEOMETRY_CHANGED)) {
+            for (size_t i=0 ; i<list->numHwLayers ; i++) {
+                dump_layer(i, &list->hwLayers[i]);
+                if (i > 0)
+                    list->hwLayers[i].compositionType = HWC_OVERLAY;
+                hwc_layer_t const* l = &list->hwLayers[i];
+                if (((l->displayFrame.right - l->displayFrame.left)
+                     != (l->sourceCrop.right - l->sourceCrop.left))
+                    || ((l->displayFrame.top - l->displayFrame.bottom)
+                        != (l->sourceCrop.top - l->sourceCrop.bottom)))
+                    ALOGD("needs scaling");
+                if (l->handle) {
+                    const private_handle_t *phnd = static_cast<const private_handle_t *>(l->handle);
+                    private_handle_t::validate(phnd);
+                }
+            }
         }
     }
     return 0;
+}
+
+static void bitblitLayer(hwc_context_t *context, hwc_layer_t *l0, hwc_layer_t *l)
+{
+    const private_handle_t *surfaceHandle =
+        static_cast<const private_handle_t *>(l0->handle);
+    if (!surfaceHandle) {
+        ALOGD("null base layer");
+        return;
+    }
+
+    unsigned long *surfaceBase = (unsigned long*)surfaceHandle->base;
+    size_t surfaceStride = surfaceHandle->stride;
+    int surfaceLeft = l0->sourceCrop.left;
+    int surfaceTop = l0->sourceCrop.top;
+
+    int displayLeft = l->displayFrame.left;
+    int displayTop = l->displayFrame.top;
+    if (!l->handle)
+        return;
+    const private_handle_t *layerHandle =
+        static_cast<const private_handle_t *>(l->handle);
+    unsigned long *layerBase = (unsigned long *)layerHandle->base;
+    size_t layerStride = layerHandle->stride;
+
+    int layerLeft = l->sourceCrop.left;
+    int layerTop = l->sourceCrop.top;
+    int columns = l->sourceCrop.right - l->sourceCrop.left;
+    int rows = l->sourceCrop.bottom - l->sourceCrop.top;
+
+    ALOGD("bitblitLayer: surfaceBase=%p layerBase=%p sLeft=%d sTop=%d dLeft=%d dTop=%d lLeft=%d lTop=%d",
+          surfaceBase, layerBase, surfaceLeft, surfaceTop, displayLeft, displayTop, layerLeft, layerTop);
+
+    if (context->bb_fd) {
+        struct xylonbb_params params;
+        ALOGD("surfaceHandle=%d layerHandle=%d", surfaceHandle->fd, layerHandle->fd);
+        params.dst_dma_buf = surfaceHandle->fd;
+        params.dst_offset = 4*(displayLeft + surfaceLeft + (displayTop + surfaceTop)*surfaceStride);
+        params.dst_stripe = surfaceStride;
+        params.src_dma_buf = layerHandle->fd;
+        params.src_offset = 4*(layerLeft + layerTop*layerStride);
+        params.src_stripe = layerStride;
+        params.num_columns = columns;
+        params.num_rows = rows;
+        int status = ioctl(context->bb_fd, XYLONBB_IOC_BITBLIT, &params);
+        if (status == 0)
+            return;
+    }
+
+    for (int i = 0; i < columns; i++) {
+        for (int j = 0; j < rows; j++) {
+            if ((displayLeft + surfaceLeft + i 
+                 + (j+displayTop+surfaceTop)*surfaceStride)*4 > surfaceHandle->size) {
+                ALOGD("base ref out of bounds");
+                return;
+            }
+            if ((layerLeft + i + (j+layerTop)*layerStride)*4 > layerHandle->size) {
+                ALOGD("layer ref out of bounds: layerLeft %d i %d j %d layerTop %d layerStride %d size %d",
+                      layerLeft, i, j, layerTop, layerStride, layerHandle->size);
+                return;
+            }
+            surfaceBase[displayLeft + surfaceLeft + i + (j+displayTop+surfaceTop)*surfaceStride] =
+                layerBase[layerLeft + i + (j+layerTop)*layerStride];
+        }
+    }
 }
 
 static int hwc_set(hwc_composer_device_t *dev,
@@ -87,10 +171,17 @@ static int hwc_set(hwc_composer_device_t *dev,
         hwc_surface_t sur,
         hwc_layer_list_t* list)
 {
-    if (0) {
+    if (list->numHwLayers > 1) {
         ALOGD("hwc_set dpy=%p surface=%p\n", dpy, sur);
+
+        hwc_layer_t *l0 = &list->hwLayers[0];
+        hwc_context_t *context = (struct hwc_context_t *)dev;
+        
         for (size_t i=0 ; i<list->numHwLayers ; i++) {
-            dump_layer(&list->hwLayers[i]);
+            dump_layer(i, &list->hwLayers[i]);
+            if (i > 0) {
+                bitblitLayer(context, l0, &list->hwLayers[i]);
+            }
         }
     }
 
@@ -134,9 +225,11 @@ static int hwc_device_open(const struct hw_module_t* module, const char* name,
 
         *device = &dev->device.common;
 
-        int fd = open("/dev/mem", O_RDWR);
+        int fd = open("/dev/xylonbb", O_RDWR);
+        if (fd)
+            dev->bb_fd = fd;
         if (fd <= 0) {
-            ALOGE("failed to open /dev/mem: fd=%d errno=%d:%s\n",
+            ALOGE("failed to open /dev/xylonbb: fd=%d errno=%d:%s\n",
                   fd, errno, strerror(errno));
         }
         status = 0;
