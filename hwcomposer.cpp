@@ -84,7 +84,7 @@ static int hwc_prepare(hwc_composer_device_t *dev, hwc_layer_list_t* list) {
         ALOGD("hwc_prepare");
         if (list && (list->flags & HWC_GEOMETRY_CHANGED)) {
             for (size_t i=0 ; i<list->numHwLayers ; i++) {
-                hwc_layer_t const* l = &list->hwLayers[i];
+                hwc_layer_t* l = &list->hwLayers[i];
 
                 dump_layer(i, l);
 
@@ -132,55 +132,30 @@ static void bitblitLayer(hwc_context_t *context, hwc_layer_t *l0, hwc_layer_t *l
     int columns = l->sourceCrop.right - l->sourceCrop.left;
     int rows = l->sourceCrop.bottom - l->sourceCrop.top;
 
-    ALOGD("bitblitLayer: surfaceBase=%p layerBase=%p sLeft=%d sTop=%d dLeft=%d dTop=%d lLeft=%d lTop=%d",
-          surfaceBase, layerBase, surfaceLeft, surfaceTop, displayLeft, displayTop, layerLeft, layerTop);
-
-    if (context->bb_fd) {
-        struct xylonbb_params params;
-        ALOGD("surfaceHandle=%d layerHandle=%d surfaceStride=%d layerStride=%d",
-              surfaceHandle->fd, layerHandle->fd, surfaceStride, layerStride);
-        if (l->compositionType == HWC_BLENDING_PREMULT) {
-            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
-            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
-        } else if (l->compositionType == HWC_BLENDING_COVERAGE) {
-            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
-            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
-        } else {
-            params.rop = LOGIBITBLIT_ROP_S;
-            params.op = LOGIBITBLIT_OP_MOVE_WITH_ROP;
-
-            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
-            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
-        }
-        params.dst_dma_buf = surfaceHandle->fd;
-        params.dst_offset = 4*(displayLeft + surfaceLeft + (displayTop + surfaceTop)*surfaceStride);
-        params.dst_stripe = 4*surfaceStride;
-        params.src_dma_buf = layerHandle->fd;
-        params.src_offset = 4*(layerLeft + layerTop*layerStride);
-        params.src_stripe = 4*layerStride;
-        params.num_columns = 4*columns-1;
-        params.num_rows = rows-1;
-        int status = ioctl(context->bb_fd, XYLONBB_IOC_BITBLIT, &params);
-        if (status == 0)
-            return;
+    struct xylonbb_params params;
+    ALOGD("surfaceHandle=%d layerHandle=%d surfaceStride=%d layerStride=%d",
+          surfaceHandle->fd, layerHandle->fd, surfaceStride, layerStride);
+    if (l->blending == HWC_BLENDING_PREMULT) {
+        params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
+        params.op = LOGIBITBLIT_OP_PORTER_DUFF;
+    } else if (l->blending == HWC_BLENDING_COVERAGE) {
+        params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
+        params.op = LOGIBITBLIT_OP_PORTER_DUFF;
+    } else {
+        params.rop = LOGIBITBLIT_ROP_S;
+        params.op = LOGIBITBLIT_OP_MOVE_WITH_ROP;
     }
-
-    for (int i = 0; i < columns; i++) {
-        for (int j = 0; j < rows; j++) {
-            if ((displayLeft + surfaceLeft + i 
-                 + (j+displayTop+surfaceTop)*surfaceStride)*4 > surfaceHandle->size) {
-                ALOGD("base ref out of bounds");
-                return;
-            }
-            if ((layerLeft + i + (j+layerTop)*layerStride)*4 > layerHandle->size) {
-                ALOGD("layer ref out of bounds: layerLeft %d i %d j %d layerTop %d layerStride %d size %d",
-                      layerLeft, i, j, layerTop, layerStride, layerHandle->size);
-                return;
-            }
-            surfaceBase[displayLeft + surfaceLeft + i + (j+displayTop+surfaceTop)*surfaceStride] =
-                layerBase[layerLeft + i + (j+layerTop)*layerStride];
-        }
-    }
+    params.dst_dma_buf = surfaceHandle->fd;
+    params.dst_offset = 4*(displayLeft + surfaceLeft + (displayTop + surfaceTop)*surfaceStride);
+    params.dst_stripe = 4*surfaceStride;
+    params.src_dma_buf = layerHandle->fd;
+    params.src_offset = 4*(layerLeft + layerTop*layerStride);
+    params.src_stripe = 4*layerStride;
+    params.num_columns = 4*columns-1;
+    params.num_rows = rows-1;
+    int status = ioctl(context->bb_fd, XYLONBB_IOC_BITBLIT, &params);
+    if (status == 0)
+        return;
 }
 
 static int hwc_set(hwc_composer_device_t *dev,
