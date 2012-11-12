@@ -79,22 +79,25 @@ static void dump_layer(int layer_number, hwc_layer_t const* l) {
 
 static int hwc_prepare(hwc_composer_device_t *dev, hwc_layer_list_t* list) {
     if (list->numHwLayers > 1) {
+        hwc_context_t *context = (struct hwc_context_t *)dev;
+
         ALOGD("hwc_prepare");
         if (list && (list->flags & HWC_GEOMETRY_CHANGED)) {
             for (size_t i=0 ; i<list->numHwLayers ; i++) {
-                dump_layer(i, &list->hwLayers[i]);
-                if (i > 0)
-                    list->hwLayers[i].compositionType = HWC_OVERLAY;
                 hwc_layer_t const* l = &list->hwLayers[i];
+
+                dump_layer(i, l);
+
                 if (((l->displayFrame.right - l->displayFrame.left)
                      != (l->sourceCrop.right - l->sourceCrop.left))
                     || ((l->displayFrame.top - l->displayFrame.bottom)
-                        != (l->sourceCrop.top - l->sourceCrop.bottom)))
-                    ALOGD("needs scaling");
-                if (l->handle) {
-                    const private_handle_t *phnd = static_cast<const private_handle_t *>(l->handle);
-                    private_handle_t::validate(phnd);
+                        != (l->sourceCrop.top - l->sourceCrop.bottom))) {
+                    // xylon bitblit does handle scaling
+                    continue;
                 }
+
+                if (i > 0 && context->bb_fd)
+                    l->compositionType = HWC_OVERLAY;
             }
         }
     }
@@ -134,15 +137,29 @@ static void bitblitLayer(hwc_context_t *context, hwc_layer_t *l0, hwc_layer_t *l
 
     if (context->bb_fd) {
         struct xylonbb_params params;
-        ALOGD("surfaceHandle=%d layerHandle=%d", surfaceHandle->fd, layerHandle->fd);
+        ALOGD("surfaceHandle=%d layerHandle=%d surfaceStride=%d layerStride=%d",
+              surfaceHandle->fd, layerHandle->fd, surfaceStride, layerStride);
+        if (l->compositionType == HWC_BLENDING_PREMULT) {
+            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
+            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
+        } else if (l->compositionType == HWC_BLENDING_COVERAGE) {
+            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
+            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
+        } else {
+            params.rop = LOGIBITBLIT_ROP_S;
+            params.op = LOGIBITBLIT_OP_MOVE_WITH_ROP;
+
+            params.rop = LOGIBITBLIT_ROP_PD_S_OVER_D;
+            params.op = LOGIBITBLIT_OP_PORTER_DUFF;
+        }
         params.dst_dma_buf = surfaceHandle->fd;
         params.dst_offset = 4*(displayLeft + surfaceLeft + (displayTop + surfaceTop)*surfaceStride);
-        params.dst_stripe = surfaceStride;
+        params.dst_stripe = 4*surfaceStride;
         params.src_dma_buf = layerHandle->fd;
         params.src_offset = 4*(layerLeft + layerTop*layerStride);
-        params.src_stripe = layerStride;
-        params.num_columns = columns;
-        params.num_rows = rows;
+        params.src_stripe = 4*layerStride;
+        params.num_columns = 4*columns-1;
+        params.num_rows = rows-1;
         int status = ioctl(context->bb_fd, XYLONBB_IOC_BITBLIT, &params);
         if (status == 0)
             return;
